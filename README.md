@@ -4,6 +4,8 @@ forward tencent qq message to wechat
 ##### 中文说明
 这个项目是偶然看到[MiraiGo](https://github.com/Mrs4s/MiraiGo)提供的非常丰富的接口，花了半天随手写几行代码，分享给需要的人
 
+有需要可以自己增加新功能（本人懒，不打算再完善了）
+
 使用这个项目的必要条件：
 - 手机安装企业微信（个人可免费注册）
 - 手机安装QQ或TIM
