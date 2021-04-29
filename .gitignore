@@ -13,3 +13,9 @@
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+device.json
+
+token.dat
+
+qq2wechat
