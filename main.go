@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -13,6 +14,7 @@ import (
 	"os"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/elitah/utils/exepath"
@@ -21,10 +23,13 @@ import (
 	"github.com/Mrs4s/MiraiGo/client"
 	"github.com/Mrs4s/MiraiGo/message"
 	"github.com/astaxie/beego/httplib"
+	"github.com/robfig/cron/v3"
 )
 
 var (
 	exeDir = exepath.GetExeDir()
+
+	gCron *cron.Cron
 
 	qywx = &QYWeiXinAPI{}
 )
@@ -37,6 +42,8 @@ type QYWeiXinAPI struct {
 	AppSecret string
 	//
 	flag uint32
+	//
+	enabled uint32
 	//
 	accessToken string
 }
@@ -73,6 +80,8 @@ func (this *QYWeiXinAPI) Init() {
 								//
 								failcnt = 0
 								//
+								ioutil.WriteFile("/tmp/qq2wechat.txt", []byte(result.AccessToken), 0644)
+								//
 								this.accessToken = result.AccessToken
 								//
 								//this.SendText("测试\n测试\n测试\n测试\n测试")
@@ -104,9 +113,28 @@ func (this *QYWeiXinAPI) Init() {
 	}
 }
 
+func (this *QYWeiXinAPI) SetEnabled(flag bool) {
+	//
+	fmt.Println("QYWeiXinAPI: set enabled", flag)
+	//
+	if flag {
+		//
+		atomic.StoreUint32(&this.enabled, 0x1)
+		//
+		return
+	}
+	//
+	atomic.StoreUint32(&this.enabled, 0x0)
+}
+
 func (this *QYWeiXinAPI) SendText(content string) bool {
 	//
 	if 0x0 == atomic.LoadUint32(&this.flag) {
+		//
+		return false
+	}
+	//
+	if 0x0 == atomic.LoadUint32(&this.enabled) {
 		//
 		return false
 	}
@@ -172,6 +200,11 @@ func (this *QYWeiXinAPI) SendText(content string) bool {
 func (this *QYWeiXinAPI) SendImage(data []byte) bool {
 	//
 	if 0x0 == atomic.LoadUint32(&this.flag) {
+		//
+		return false
+	}
+	//
+	if 0x0 == atomic.LoadUint32(&this.enabled) {
 		//
 		return false
 	}
@@ -356,7 +389,7 @@ func (this *QYWeiXinAPI) uploadMedia(data []byte, media_type string) (string, er
 	}
 }
 
-func qrcodeLogin(c *client.QQClient) *client.QRCodeLoginInfo {
+func qrcodeLogin(c *client.QQClient) (*client.QRCodeLoginInfo, bool) {
 	//
 	for {
 		//
@@ -383,11 +416,11 @@ func qrcodeLogin(c *client.QQClient) *client.QRCodeLoginInfo {
 						reload = true
 					case client.QRCodeConfirmed:
 						//
-						return _resp.LoginInfo
+						return _resp.LoginInfo, true
 					}
 				} else {
 					//
-					fmt.Println(err)
+					fmt.Println("QueryQRCodeStatus:", err)
 					//
 					break
 				}
@@ -396,7 +429,15 @@ func qrcodeLogin(c *client.QQClient) *client.QRCodeLoginInfo {
 			}
 		} else {
 			//
-			fmt.Println(err)
+			fmt.Println("FetchQRCode:", err)
+			//
+			if errors.Is(err, client.ErrAlreadyOnline) {
+				//
+				return nil, true
+			} else {
+				//
+				return nil, false
+			}
 		}
 		//
 		time.Sleep(time.Second)
@@ -460,6 +501,8 @@ func main() {
 	//
 	var ca string
 	//
+	var cron_exit string
+	//
 	flag.BoolVar(&tempEnable, "t", false, "是否开启临时消息转发")
 	flag.BoolVar(&groupEnable, "g", false, "是否开启群消息转发")
 	//
@@ -468,6 +511,8 @@ func main() {
 	flag.StringVar(&appSecret, "key", "", "（企业微信）应用密钥.")
 	//
 	flag.StringVar(&ca, "ca", "", "CA filepath.")
+	//
+	flag.StringVar(&cron_exit, "c", "", "cron exit value")
 	//
 	flag.Parse()
 	//
@@ -478,11 +523,74 @@ func main() {
 		qywx.AppSecret = appSecret
 		//
 		qywx.Init()
+		//
+		y, m, d := time.Now().Date()
+		//
+		if time.Now().Before(time.Date(y, m, d, 22, 0, 0, 0, time.Local)) {
+			//
+			qywx.SetEnabled(true)
+		}
 	}
 	//
 	if "" != ca {
 		//
 		initHttplib(ca)
+	}
+	//
+	if c := cron.New(
+		cron.WithSeconds(),
+		cron.WithLocation(time.FixedZone("UTC+8", 8*60*60)),
+	); nil != c {
+		//
+		gCron = c
+		//
+		c.Start()
+		//
+		if id, err := c.AddFunc("0 0 22 * * ?", func() {
+			//
+			qywx.SetEnabled(false)
+		}); nil == err {
+			//
+			fmt.Printf("qywx.SetEnabled(false): next run at %v(0 0 22 * * ?)\n", c.Entry(id).Next)
+		} else {
+			//
+			fmt.Println(err)
+		}
+		//
+		if id, err := c.AddFunc("0 0 8 * * ?", func() {
+			//
+			qywx.SetEnabled(true)
+		}); nil == err {
+			//
+			fmt.Printf("qywx.SetEnabled(true): next run at %v(0 0 8 * * ?)\n", c.Entry(id).Next)
+		} else {
+			//
+			fmt.Println(err)
+		}
+		//
+		if "" != cron_exit {
+			//
+			fmt.Println("cron_exit:", cron_exit)
+			// 添加定时执行函数
+			if id, err := c.AddFunc(cron_exit, func() {
+				//
+				if p, err := os.FindProcess(os.Getpid()); nil == err {
+					//
+					p.Signal(syscall.SIGQUIT)
+					p.Signal(syscall.SIGTERM)
+					//
+					time.Sleep(time.Second)
+					//
+					p.Signal(syscall.SIGKILL)
+				}
+			}); nil == err {
+				//
+				fmt.Printf("exit at %v(%s)\n", c.Entry(id).Next, cron_exit)
+			} else {
+				//
+				fmt.Println(err)
+			}
+		}
 	}
 	//
 	switch {
@@ -501,6 +609,8 @@ func main() {
 		ioutil.WriteFile(exeDir+"/device.json", client.SystemDeviceInfo.ToJson(), 0644)
 	}
 	//
+	fmt.Println("\n\n\n\n\n\n")
+	//
 	fmt.Printf("使用协议: %v\n", func() string {
 		switch client.SystemDeviceInfo.Protocol {
 		case client.IPad:
@@ -516,25 +626,6 @@ func main() {
 	}())
 	//
 	cli := client.NewClientEmpty()
-	//
-	cli.OnLog(func(c *client.QQClient, e *client.LogEvent) {
-		switch e.Type {
-		case "INFO":
-			fmt.Println("[I]", e.Message)
-		case "ERROR":
-			fmt.Println("[E]", e.Message)
-		case "DEBUG":
-			fmt.Println("[D]", e.Message)
-		}
-	})
-	//
-	/*
-		func (c *QQClient) OnPrivateMessage(f func(*QQClient, *message.PrivateMessage))
-		func (c *QQClient) OnTempMessage(f func(*QQClient, *TempMessageEvent))
-		func (c *QQClient) OnGroupMessage(f func(*QQClient, *message.GroupMessage))
-		func (c *QQClient) OnSelfPrivateMessage(f func(*QQClient, *message.PrivateMessage))
-		func (c *QQClient) OnSelfGroupMessage(f func(*QQClient, *message.GroupMessage))
-	*/
 	//
 	sendFunc := func(from *message.Sender, content string) {
 		//
@@ -590,7 +681,7 @@ func main() {
 		switch result := msg.(type) {
 		case *message.PrivateMessage:
 			//
-			if "OnPrivateMessage" == tag {
+			if "PrivateMessageEvent" == tag {
 				//
 				fmt.Println("接收到普通消息")
 				//
@@ -598,7 +689,7 @@ func main() {
 			}
 		case *message.TempMessage:
 			//
-			if "OnTempMessage" == tag {
+			if "TempMessageEvent" == tag {
 				//
 				fmt.Println("接收到临时消息")
 				//
@@ -609,7 +700,7 @@ func main() {
 			}
 		case *message.GroupMessage:
 			//
-			if "OnGroupMessage" == tag {
+			if "GroupMessageEvent" == tag {
 				//
 				fmt.Println("接收到群消息")
 				//
@@ -627,63 +718,91 @@ func main() {
 		fmt.Println("=====================================================================")
 	}
 	//
-	cli.OnPrivateMessage(func(c *client.QQClient, msg *message.PrivateMessage) {
+	cli.PrivateMessageEvent.Subscribe(func(c *client.QQClient, msg *message.PrivateMessage) {
 		//
-		msgRecv(c, "OnPrivateMessage", msg)
+		msgRecv(c, "PrivateMessageEvent", msg)
 	})
 	//
-	cli.OnTempMessage(func(c *client.QQClient, msg *client.TempMessageEvent) {
+	cli.TempMessageEvent.Subscribe(func(c *client.QQClient, msg *client.TempMessageEvent) {
 		//
-		msgRecv(c, "OnTempMessage", msg.Message)
+		msgRecv(c, "TempMessageEvent", msg.Message)
 	})
 	//
-	cli.OnGroupMessage(func(c *client.QQClient, msg *message.GroupMessage) {
+	cli.GroupMessageEvent.Subscribe(func(c *client.QQClient, msg *message.GroupMessage) {
 		//
-		msgRecv(c, "OnGroupMessage", msg)
+		msgRecv(c, "GroupMessageEvent", msg)
 	})
 	//
-	cli.OnSelfPrivateMessage(func(c *client.QQClient, msg *message.PrivateMessage) {
+	cli.SelfPrivateMessageEvent.Subscribe(func(c *client.QQClient, msg *message.PrivateMessage) {
 		//
-		msgRecv(c, "OnSelfPrivateMessage", msg)
+		msgRecv(c, "SelfPrivateMessageEvent", msg)
 	})
 	//
-	cli.OnSelfGroupMessage(func(c *client.QQClient, msg *message.GroupMessage) {
+	cli.SelfGroupMessageEvent.Subscribe(func(c *client.QQClient, msg *message.GroupMessage) {
 		//
-		msgRecv(c, "OnSelfGroupMessage", msg)
+		msgRecv(c, "SelfGroupMessageEvent", msg)
 	})
 	//
-	switch {
-	default:
-		//
-		fmt.Println("加载登陆令牌")
+	startLogin := func() bool {
 		//
 		if data, err := ioutil.ReadFile(exeDir + "/token.dat"); nil == err {
 			//
-			fmt.Println("正在使用令牌登陆")
+			fmt.Println("加载登陆令牌")
 			//
-			if err := cli.TokenLogin(data); nil == err {
+			for i := 0; 10 > i; i++ {
 				//
-				fmt.Println("已使用令牌登陆")
+				fmt.Println("正在使用令牌登陆")
 				//
-				break
+				if err := cli.TokenLogin(data); nil == err {
+					//
+					fmt.Println("已使用令牌登陆")
+					//
+					return true
+				} else {
+					//
+					fmt.Println("TokenLogin:", err)
+				}
+				//
+				time.Sleep(3 * time.Second)
 			}
+			//
+			os.Remove(exeDir + "/token.dat")
 		}
 		//
 		fmt.Println("正在使用二维码登陆")
 		//
-		if info := qrcodeLogin(cli); nil != info {
+		if info, login_ok := qrcodeLogin(cli); login_ok {
 			//
-			if resp, err := cli.QRCodeLogin(info); nil == err {
+			if nil != info {
 				//
-				if resp.Success {
+				if resp, err := cli.QRCodeLogin(info); nil == err {
 					//
-					if data := cli.GenToken(); 0 < len(data) {
+					if resp.Success {
 						//
-						ioutil.WriteFile(exeDir+"/token.dat", data, 0644)
+						if data := cli.GenToken(); 0 < len(data) {
+							//
+							ioutil.WriteFile(exeDir+"/token.dat", data, 0644)
+						}
+						//
+						return true
 					}
 				}
 			}
+		} else {
+			//
+			fmt.Println("加载失败，15秒后退出")
+			//
+			time.Sleep(15 * time.Second)
 		}
+		//
+		return false
+	}
+	//
+	if !startLogin() {
+		//
+		fmt.Println("无法登陆，退出")
+		//
+		return
 	}
 	//
 	go func() {
